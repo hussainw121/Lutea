@@ -15,7 +15,7 @@ class MenstrualCyclePredictionModel:
         self.feature_names = None
         self.is_trained = False
         
-    def load_and_prepare_data(self, csv_file='Realdataboth.csv'):
+    def load_and_prepare_data(self, csv_file='DataSet.csv'):
         try:
             df = pd.read_csv(csv_file)
             print(f"Loaded data: {len(df)} samples")
