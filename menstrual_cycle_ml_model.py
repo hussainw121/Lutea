@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -10,7 +9,7 @@ import joblib
 
 class MenstrualCyclePredictionModel:
     def __init__(self):
-        self.model = None
+        self.model = LinearRegression()  # Use only the best performing model
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
         self.feature_names = None
@@ -43,19 +42,24 @@ class MenstrualCyclePredictionModel:
             
             target = 'days_to_next_cycle'
             
-            df_clean = df[feature_columns + [target]].dropna()
+            df_clean = df[feature_columns + [target] + ['age_group']].dropna()
             
             X = df_clean[feature_columns]
             y = df_clean[target]
+            age_groups = df_clean['age_group']
             
             valid_mask = (y >= 0) & (y <= 35) & (df_clean['lh_level_miu_l'] > 0) & (df_clean['progesterone_ng_ml'] > 0)
             X = X[valid_mask]
             y = y[valid_mask]
+            age_groups = age_groups[valid_mask]
             
             self.feature_names = feature_columns
             
             print(f"Prepared data: {len(X)} samples with {len(feature_columns)} features")
-            return X, y, df_clean[valid_mask]
+            print(f"Age group distribution:")
+            print(age_groups.value_counts())
+            
+            return X, y, age_groups
             
         except FileNotFoundError:
             print("CSV file not found.")
@@ -64,52 +68,126 @@ class MenstrualCyclePredictionModel:
             print(f"Error loading data: {e}")
             return None, None, None
     
-    def train_model(self, X, y):
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+    def stratified_train_test_split(self, X, y, age_groups, test_size=0.05, random_state=42):
+        """
+        Perform stratified sampling by age group - 80/20 split within each age group
+        """
+        X_train_list = []
+        X_test_list = []
+        y_train_list = []
+        y_test_list = []
         
+        print(f"\nPerforming stratified split by age group ({(1-test_size)*100:.0f}% train, {test_size*100:.0f}% test):")
+        print("-" * 60)
+        
+        for age_group in age_groups.unique():
+            # Get indices for this age group
+            age_mask = age_groups == age_group
+            X_age = X[age_mask]
+            y_age = y[age_mask]
+            
+            if len(X_age) < 2:
+                print(f"Age group {age_group}: {len(X_age)} samples - skipping (too few samples)")
+                continue
+                
+            # Split this age group 80/20
+            X_train_age, X_test_age, y_train_age, y_test_age = train_test_split(
+                X_age, y_age, 
+                test_size=test_size, 
+                random_state=random_state,
+                shuffle=True
+            )
+            
+            X_train_list.append(X_train_age)
+            X_test_list.append(X_test_age)
+            y_train_list.append(y_train_age)
+            y_test_list.append(y_test_age)
+            
+            print(f"Age group {age_group}: {len(X_age)} total → {len(X_train_age)} train, {len(X_test_age)} test")
+        
+        # Combine all age groups
+        X_train = pd.concat(X_train_list, ignore_index=True)
+        X_test = pd.concat(X_test_list, ignore_index=True)
+        y_train = pd.concat(y_train_list, ignore_index=True)
+        y_test = pd.concat(y_test_list, ignore_index=True)
+        
+        print(f"\nFinal split: {len(X_train)} train samples, {len(X_test)} test samples")
+        return X_train, X_test, y_train, y_test
+    
+    def calculate_accuracy_metrics(self, y_true, y_pred, model_name="Linear Regression"):
+        """
+        Calculate comprehensive accuracy metrics and explain day-range patterns
+        """
+        mae = mean_absolute_error(y_true, y_pred)
+        mse = mean_squared_error(y_true, y_pred)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_true, y_pred)
+        
+        # Calculate percentage of predictions within different day ranges
+        errors = np.abs(y_true - y_pred)
+        within_1_day = np.mean(errors <= 1.0) * 100
+        within_2_days = np.mean(errors <= 2.0) * 100
+        within_3_days = np.mean(errors <= 3.0) * 100
+        within_5_days = np.mean(errors <= 5.0) * 100
+        
+        print(f"\n{model_name} Performance Metrics:")
+        print("=" * 50)
+        print(f"Mean Absolute Error (MAE): {mae:.2f} days")
+        print(f"Root Mean Square Error (RMSE): {rmse:.2f} days")
+        print(f"R² Score: {r2:.3f}")
+        print(f"\nAccuracy by Day Range:")
+        print(f"  Within 1 day:  {within_1_day:.1f}%")
+        print(f"  Within 2 days: {within_2_days:.1f}%")
+        print(f"  Within 3 days: {within_3_days:.1f}%")
+        print(f"  Within 5 days: {within_5_days:.1f}%")
+        
+        # Explain why accuracy changes by day range
+        
+        return {
+            'mae': mae,
+            'rmse': rmse,
+            'r2': r2,
+            'within_1_day': within_1_day,
+            'within_2_days': within_2_days,
+            'within_3_days': within_3_days,
+            'within_5_days': within_5_days
+        }
+    
+    
+    
+    def train_model(self, X, y, age_groups):
+        # Perform stratified split by age group
+        X_train, X_test, y_train, y_test = self.stratified_train_test_split(X, y, age_groups)
+        
+        # Scale features for Linear Regression
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        models = {
-            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
-            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
-            'Linear Regression': LinearRegression()
-        }
+        print("\nTraining Linear Regression model with stratified age group sampling")
+        print("=" * 70)
         
-        best_score = float('inf')
-        best_model = None
-        best_name = None
+        # Train the model
+        self.model.fit(X_train_scaled, y_train)
+        y_pred = self.model.predict(X_test_scaled)
         
-        print("\nTraining and evaluating models")
-        print("-" * 40)
+        # Calculate comprehensive metrics with explanation
+        metrics = self.calculate_accuracy_metrics(y_test, y_pred)
         
-        for name, model in models.items():
-            if name == 'Linear Regression':
-                model.fit(X_train_scaled, y_train)
-                y_pred = model.predict(X_test_scaled)
-            else:
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
-            
-            mae = mean_absolute_error(y_test, y_pred)
-            mse = mean_squared_error(y_test, y_pred)
-            r2 = r2_score(y_test, y_pred)
-            
-            print(f"{name}: MAE={mae:.2f}, RMSE={np.sqrt(mse):.2f}, R²={r2:.3f}")
-            
-            if mae < best_score:
-                best_score = mae
-                best_model = model
-                best_name = name
-        
-        self.model = best_model
         self.is_trained = True
         
-        print(f"Best model: {best_name} (MAE: {best_score:.2f})")
+        # Show feature coefficients (Linear Regression specific)
+        print(f"\nLinear Regression Coefficients:")
+        print("-" * 40)
+        coef_df = pd.DataFrame({
+            'feature': self.feature_names,
+            'coefficient': self.model.coef_
+        }).sort_values('coefficient', key=abs, ascending=False)
         
-        return X_test, y_test
+        for _, row in coef_df.iterrows():
+            impact = "increases" if row['coefficient'] > 0 else "decreases"
+            print(f"{row['feature']:20}: {row['coefficient']:6.3f} ({impact} days to next period)")
+        
+        return X_test, y_test, metrics
     
     def predict_next_period(self, age, lh_level, progesterone_level, current_cycle_day=None):
         if not self.is_trained:
@@ -146,15 +224,15 @@ class MenstrualCyclePredictionModel:
             cycle_progress
         ]])
         
-        if isinstance(self.model, LinearRegression):
-            features = self.scaler.transform(features)
+        # Scale features for Linear Regression
+        features_scaled = self.scaler.transform(features)
         
-        days_until_period = self.model.predict(features)[0]
+        days_until_period = self.model.predict(features_scaled)[0]
         days_until_period = max(0, min(35, days_until_period))
         
         predicted_date = datetime.now() + timedelta(days=int(days_until_period))
         
-        # Confidence score: inverse of distance from average cycle length (28 days)
+        # Improved confidence based on typical prediction ranges
         confidence_score = max(0, 100 - abs(28 - days_until_period) * 3)
         
         results = {
@@ -199,22 +277,30 @@ class MenstrualCyclePredictionModel:
 
 
 if __name__ == "__main__":
-    print("MENSTRUAL CYCLE PREDICTION MODEL")
-    print("=" * 50)
+    print("MENSTRUAL CYCLE PREDICTION - LINEAR REGRESSION MODEL")
+    print("=" * 60)
     
+    # Initialize the model
     predictor = MenstrualCyclePredictionModel()
-    X, y, df = predictor.load_and_prepare_data()
+    
+    # Load and prepare data
+    X, y, age_groups = predictor.load_and_prepare_data()
     
     if X is not None:
-        X_test, y_test = predictor.train_model(X, y)
+        # Train the model with stratified age group sampling
+        X_test, y_test, metrics = predictor.train_model(X, y, age_groups)
+        
+        # Save the model
         predictor.save_model()
         
-        print("\nMODEL READY FOR PREDICTIONS")
-        print("=" * 50)
+        print("\n" + "=" * 70)
+        print("INTERACTIVE PREDICTION MODE")
+        print("=" * 70)
         
+        # Interactive prediction loop
         while True:
             try:
-                print("\nEnter your own data (or type 'q' to quit):")
+                print("\nEnter your hormone data (or type 'q' to quit):")
                 age = input("Age (years): ")
                 if age.lower() == "q":
                     break
@@ -223,7 +309,7 @@ if __name__ == "__main__":
                 lh_level = float(input("LH level (mIU/L): "))
                 progesterone_level = float(input("Progesterone level (ng/mL): "))
                 
-                cycle_day_input = input("Current cycle day (1–28, leave blank to auto-estimate): ")
+                cycle_day_input = input("Current cycle day (1–35, leave blank to auto-estimate): ")
                 cycle_day = int(cycle_day_input) if cycle_day_input.strip() else None
                 
                 result = predictor.predict_next_period(
@@ -234,10 +320,16 @@ if __name__ == "__main__":
                 )
                 
                 if result:
-                    print("\nPrediction Results:")
+                    print("\nPREDICTION RESULTS:")
                     print(f"Next period in: {result['days_until_next_period']} days")
                     print(f"Predicted date: {result['predicted_date']}")
                     print(f"Confidence score: {result['confidence_score']}%")
                     print(f"Current phase: {result['current_phase']}")
+                    
+            except ValueError:
+                print("Please enter valid numbers for age and hormone levels.")
             except Exception as e:
                 print(f"Input error: {e}. Please try again.")
+    
+    else:
+        print("Could not load data. Please check your CSV file.")
