@@ -11,7 +11,7 @@ import joblib
 
 class UltimateMenstrualCycleModel:
     def __init__(self):
-        # Using Gradient Boosting - captures non-linear patterns in hormones
+        # Use a gradient boosting regressor because hormone relationships are not purely linear.
         self.model = GradientBoostingRegressor(
             n_estimators=200,
             learning_rate=0.05,
@@ -35,9 +35,11 @@ class UltimateMenstrualCycleModel:
         df['prog_roc'] = df.groupby('subject_id')['progesterone_ng_ml'].diff()
         df['lh_roc'] = df.groupby('subject_id')['lh_level_miu_l'].diff()
         
+        # First sample for each subject has no prior value, so fill with zero change.
         df['prog_roc'] = df['prog_roc'].fillna(0)
         df['lh_roc'] = df['lh_roc'].fillna(0)
         
+        # Create simple flags for hormone trend patterns.
         df['prog_declining'] = (df['prog_roc'] < -1.0).astype(int)
         df['prog_rapid_decline'] = (df['prog_roc'] < -2.0).astype(int)
         df['prog_stable_or_rising'] = (df['prog_roc'] >= 0).astype(int)
@@ -52,18 +54,21 @@ class UltimateMenstrualCycleModel:
             df = pd.read_csv(csv_file)
             print(f"Loaded data: {len(df)} samples")
             
+            # Convert age groups into numbers so the model can use the trend.
             age_mapping = {'25-29': 27, '30-34': 32, '35-39': 37, '40-44': 42}
             df['age_numeric'] = df['age_group'].map(age_mapping)
             
+            # Phase labels are turned into integers for the model.
             df['phase_encoded'] = self.label_encoder.fit_transform(df['phase'])
             
             print("\nCalculating rate of change features...")
             df = self.calculate_rate_of_change(df)
             
+            # Keep a small version of the key data for plotting later.
             self.prog_roc_data = df[['cycle_day', 'progesterone_ng_ml', 'prog_roc', 
                                      'days_to_next_cycle']].copy()
             
-            # Progesterone absolute levels
+            # Progesterone absolute levels are turned into state flags which helps the model see where the hormone value falls in common cycle ranges.
             df['prog_premenstrual_low'] = (df['progesterone_ng_ml'] < 1.5).astype(int)
             df['prog_late_luteal'] = ((df['progesterone_ng_ml'] >= 1.5) & 
                                       (df['progesterone_ng_ml'] < 5.0)).astype(int)
@@ -74,22 +79,23 @@ class UltimateMenstrualCycleModel:
             df['prog_follicular'] = (df['progesterone_ng_ml'] < 2.0).astype(int)
             df['prog_ovulation_confirmed'] = (df['progesterone_ng_ml'] >= 5.0).astype(int)
             
-            # LH patterns
+            # LH patterns are useful around ovulation and post-surge behavior.
             df['lh_surge'] = (df['lh_level_miu_l'] > 10.0).astype(int)
             df['lh_elevated'] = ((df['lh_level_miu_l'] > 7.0) & 
                                  (df['lh_level_miu_l'] <= 10.0)).astype(int)
             df['lh_baseline'] = (df['lh_level_miu_l'] <= 7.0).astype(int)
             
-            # Cycle phase
+            # Split cycle into rough early/mid/late buckets.
             df['late_cycle'] = (df['cycle_day'] > 20).astype(int)
             df['mid_cycle'] = ((df['cycle_day'] > 10) & (df['cycle_day'] <= 20)).astype(int)
             df['early_cycle'] = (df['cycle_day'] <= 10).astype(int)
             
-            # Critical combinations
+            # Flags that try to capture approaching period risk.
             df['period_warning_strong'] = ((df['late_cycle'] == 1) & 
                                           (df['prog_declining'] == 1) & 
                                           (df['progesterone_ng_ml'] < 5.0)).astype(int)
             
+            # Strong and critical warnings combine late cycle timing with falling progesterone.
             df['period_warning_critical'] = ((df['late_cycle'] == 1) & 
                                             (df['prog_rapid_decline'] == 1) & 
                                             (df['progesterone_ng_ml'] < 3.0)).astype(int)
@@ -104,7 +110,7 @@ class UltimateMenstrualCycleModel:
             
             df['prog_lh_roc_interaction'] = df['prog_roc'] * df['lh_roc']
             
-            # Non-linear transformations (crucial for gradient boosting)
+            # Non-linear transformations let the model handle curved hormone effects.
             df['prog_squared'] = df['progesterone_ng_ml'] ** 2
             df['prog_log'] = np.log1p(df['progesterone_ng_ml'])
             df['prog_cube'] = df['progesterone_ng_ml'] ** 3
@@ -114,13 +120,13 @@ class UltimateMenstrualCycleModel:
             df['lh_log'] = np.log1p(df['lh_level_miu_l'])
             df['lh_cube'] = df['lh_level_miu_l'] ** 3
             
-            # Rate of change transformations
+            # Apply the same idea to the rate of change features.
             df['prog_roc_squared'] = df['prog_roc'] ** 2
             df['prog_roc_abs'] = np.abs(df['prog_roc'])
             df['prog_roc_cubed'] = df['prog_roc'] ** 3
             df['lh_roc_abs'] = np.abs(df['lh_roc'])
             
-            # Cycle day
+            # Cycle day transforms can help capture non-linear timing effects.
             df['cycle_day_squared'] = df['cycle_day'] ** 2
             df['cycle_day_sqrt'] = np.sqrt(df['cycle_day'])
             df['cycle_day_log'] = np.log1p(df['cycle_day'])
@@ -132,12 +138,14 @@ class UltimateMenstrualCycleModel:
                 0
             )
             
+            # Add a few rough calendar-based estimates for cycle timing.
             df['generic_cycle_estimate'] = np.clip(28 - df['cycle_day'], 0, 35)
             df['typical_luteal_length'] = 13
             
             # ============================================================
             # FEATURE SELECTION
             # ============================================================
+            # Pick the engineered columns that the model will use.
             feature_columns = [
                 # Rate of change (primary for non-linear model)
                 'prog_roc',
@@ -206,6 +214,7 @@ class UltimateMenstrualCycleModel:
             
             target = 'days_to_next_cycle'
             
+            # Keep only the rows that are complete for the features we selected.
             required_cols = feature_columns + [target] + ['age_group', 'subject_id']
             df_clean = df[required_cols].dropna()
             
@@ -213,6 +222,7 @@ class UltimateMenstrualCycleModel:
             y = df_clean[target]
             age_groups = df_clean['age_group']
             
+            # Filter out unrealistic or missing hormone values.
             valid_mask = (
                 (y >= 0) & (y <= 35) & 
                 (df_clean['lh_level_miu_l'] > 0) & 
@@ -250,6 +260,7 @@ class UltimateMenstrualCycleModel:
         
         df = self.prog_roc_data.dropna()
         
+        # Top left: raw progesterone level vs time until next period.
         ax1 = axes[0, 0]
         scatter = ax1.scatter(df['days_to_next_cycle'], df['progesterone_ng_ml'], 
                             c=df['cycle_day'], cmap='viridis', alpha=0.6, s=20)
@@ -312,6 +323,7 @@ class UltimateMenstrualCycleModel:
         """Stratified sampling"""
         X_train_list, X_test_list, y_train_list, y_test_list = [], [], [], []
         
+        # Split by age group so the test set contains similar age distribution.
         print(f"\nStratified split (80% train, 20% test):")
         print("-" * 60)
         
@@ -337,6 +349,8 @@ class UltimateMenstrualCycleModel:
         X_test = pd.concat(X_test_list, ignore_index=True)
         y_train = pd.concat(y_train_list, ignore_index=True)
         y_test = pd.concat(y_test_list, ignore_index=True)
+        
+        # Return the combined split after all age groups are handled.
         
         print(f"\nTotal: {len(X_train)} train, {len(X_test)} test")
         return X_train, X_test, y_train, y_test
@@ -371,6 +385,7 @@ class UltimateMenstrualCycleModel:
         """Train gradient boosting model"""
         X_train, X_test, y_train, y_test = self.stratified_train_test_split(X, y, age_groups)
         
+        # Standardize features so the model sees consistent scales.
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
@@ -387,6 +402,7 @@ class UltimateMenstrualCycleModel:
         
         print(f"\nTop 20 Features (by importance):")
         print("-" * 60)
+        # Show which inputs the model relied on most.
         feature_importance = pd.DataFrame({
             'feature': self.feature_names,
             'importance': self.model.feature_importances_
@@ -405,6 +421,7 @@ class UltimateMenstrualCycleModel:
             print("Model not trained.")
             return None
         
+        # If no cycle day is provided, guess a rough phase based on current hormone levels.
         if current_cycle_day is None:
             if progesterone_level > 5.0:
                 current_cycle_day = 20
@@ -420,6 +437,7 @@ class UltimateMenstrualCycleModel:
         
         lh_roc = 0
         
+        # Use hormone thresholds to infer the current cycle phase.
         if progesterone_level > 4.0:
             phase = 'luteal'
         elif lh_level > 10.0:
@@ -429,7 +447,8 @@ class UltimateMenstrualCycleModel:
         
         phase_encoded = self.label_encoder.transform([phase])[0]
         
-        # Calculate all features
+        # Build the same feature set used during training.
+        # These derived values keep prediction consistent with model inputs.
         prog_roc_abs = abs(prog_roc)
         prog_roc_squared = prog_roc ** 2
         prog_roc_cubed = prog_roc ** 3
@@ -444,6 +463,7 @@ class UltimateMenstrualCycleModel:
         progesterone_log = np.log1p(progesterone_level)
         progesterone_inv = 1.0 / (progesterone_level + 0.1)
         
+        # Same non-linear transforms used during training.
         lh_squared = lh_level ** 2
         lh_cube = lh_level ** 3
         lh_log = np.log1p(lh_level)
@@ -459,6 +479,7 @@ class UltimateMenstrualCycleModel:
         lh_elevated = int(7.0 < lh_level <= 10.0)
         lh_baseline = int(lh_level <= 7.0)
         
+        # Ratios and interaction terms capture hormone relationships.
         lh_to_prog_ratio = lh_level / (progesterone_level + 0.1)
         prog_to_lh_ratio = progesterone_level / (lh_level + 0.1)
         hormone_product = lh_level * progesterone_level
@@ -500,6 +521,7 @@ class UltimateMenstrualCycleModel:
         days_until = float(self.model.predict(features_scaled)[0])
         days_until = max(0, min(35, days_until))
         
+        # Convert the predicted days-until-period into a calendar date.
         predicted_date = datetime.now() + timedelta(days=int(days_until))
         
         if period_warning_critical:
@@ -555,6 +577,7 @@ if __name__ == "__main__":
         print("\nGenerating rate of change visualization...")
         model.plot_progesterone_rate_of_change()
         
+        # Let the user enter new values and get a prediction.
         print("\n" + "="*70)
         print("INTERACTIVE PREDICTION")
         print("="*70)
